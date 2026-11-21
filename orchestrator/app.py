@@ -52,6 +52,11 @@ class Rare(BaseModel):
 
 ramdisk = {}
 
+# The RAMDisk budget, in bytes. Set by build_app() (from the environment) or by
+# create_app() (default). It must be a module global because new_job() reads it.
+ramdisk_size = 1024 ** 3  # 1 GiB, the same default as before
+
+
 def delete_ramdisk(n:str) -> bool:
     if n in ramdisk:
         ramdisk.pop(n)
@@ -75,8 +80,15 @@ def delete_photo(path: str, wait: float = 0.1) -> bool:
 
 def create_app(db_path: str, photo_dir: str, stuck_seconds: float = db.STUCK_SECONDS,
                check_every: float = CHECK_EVERY, training_round: int = db.TRAINING_ROUND,
-               versions_path: str = "models/versions.json") -> FastAPI:
+               versions_path: str = "models/versions.json",
+               ramdisk_size_bytes: int = 1024 ** 3) -> FastAPI:
     os.makedirs(photo_dir, exist_ok=True)
+
+    # Make the budget visible to new_job(), which is defined below and reads the
+    # module-level name. This keeps direct create_app() callers (e.g. tests)
+    # working without going through build_app().
+    global ramdisk_size
+    ramdisk_size = ramdisk_size_bytes
 
     def open_db():
         return db.connect(db_path)
@@ -364,15 +376,20 @@ def create_app(db_path: str, photo_dir: str, stuck_seconds: float = db.STUCK_SEC
 RAMDISK_UNITS = {"k": 1024, "m": 1024**2, "g": 1024**3, "K": 1024, "M": 1024**2, "G": 1024**3}
 
 
+def parse_ramdisk_size(text: str) -> int:
+    """Turn "1G", "512m", "1048576" into a byte count."""
+    text = text.strip()
+    tm1 = text[-1]
+    if tm1.isdigit():
+        return int(text)
+    return int(text[:-1]) * RAMDISK_UNITS[tm1]
+
+
 def build_app() -> FastAPI:
     path = os.environ.get("PAWSORT_DB", "data/pawsort.db")
-    ramdisk_size_ = os.environ.get("PAWSORT_RAMDISK_SIZE", "1G")
-    rsp = ramdisk_size_[-1]
-    if rsp.isdigit():
-        ramdisk_size_ = int(ramdisk_size_)
-    else:
-        ramdisk_size_ = int(ramdisk_size_[-1:]) * RAMDISK_UNITS[rsp]
-    global ramdisk_size = ramdisk_size_
+    ramdisk_size_text = os.environ.get("PAWSORT_RAMDISK_SIZE", "1G")
+    ramdisk_size_bytes = parse_ramdisk_size(ramdisk_size_text)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     return create_app(path, os.environ.get("PAWSORT_PHOTOS", "data/photos"),
-                      versions_path=os.environ.get("PAWSORT_VERSIONS", "models/versions.json"))
+                      versions_path=os.environ.get("PAWSORT_VERSIONS", "models/versions.json"),
+                      ramdisk_size_bytes=ramdisk_size_bytes)
