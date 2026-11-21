@@ -366,12 +366,13 @@ RAMDISK_UNITS = {"k": 1024, "m": 1024**2, "g": 1024**3, "K": 1024, "M": 1024**2,
 
 def build_app() -> FastAPI:
     path = os.environ.get("PAWSORT_DB", "data/pawsort.db")
-    ramdisk_size = os.environ.get("PAWSORT_RAMDISK_SIZE", "1G")
-    rsp = ramdisk_size[-1]
+    ramdisk_size_ = os.environ.get("PAWSORT_RAMDISK_SIZE", "1G")
+    rsp = ramdisk_size_[-1]
     if rsp.isdigit():
-        ramdisk_size = int(ramdisk_size)
+        ramdisk_size_ = int(ramdisk_size_)
     else:
-        ramdisk_size = int(ramdisk_size[-1:]) * RAMDISK_UNITS[rsp]
+        ramdisk_size_ = int(ramdisk_size_[-1:]) * RAMDISK_UNITS[rsp]
+    global ramdisk_size = ramdisk_size_
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     return create_app(path, os.environ.get("PAWSORT_PHOTOS", "data/photos"),
                       versions_path=os.environ.get("PAWSORT_VERSIONS", "models/versions.json"))
