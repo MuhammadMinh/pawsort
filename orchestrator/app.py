@@ -12,6 +12,8 @@ from fastapi import FastAPI, Form, HTTPException, Response, UploadFile
 from pydantic import BaseModel, Field
 
 from orchestrator import db, numbers
+import psutil
+process = psutil.Process()
 
 
 LABELS = {"empty", "person", "badger", "bird", "bobcat", "car", "cat", "cow", "coyote", "deer", "dog", "fox", "lizard",
@@ -48,6 +50,13 @@ class Rare(BaseModel):
     label: str
     rare: bool
 
+ramdisk = {}
+
+def delete_ramdisk(n:str) -> bool:
+    if n in ramdisk:
+        ramdisk.pop(n)
+        return True
+    return False
 
 def delete_photo(path: str, wait: float = 0.1) -> bool:
     """True when the photo is gone, False when it is still there after a few tries."""
@@ -76,7 +85,8 @@ def create_app(db_path: str, photo_dir: str, stuck_seconds: float = db.STUCK_SEC
         return os.path.join(photo_dir, name)
 
     def drop_photo(conn: sqlite3.Connection, job: dict) -> None:
-        if job["photo_name"] and delete_photo(photo_path(job["photo_name"])):
+        pn = job["photo_name"]
+        if pn and (delete_ramdisk(pn) or delete_photo(photo_path(pn))):
             db.forget_photo(conn, job["id"])  # only now, so a photo that is still there keeps its row
 
     conn = open_db()  # makes or upgrades the table once, before anything else runs
@@ -86,11 +96,15 @@ def create_app(db_path: str, photo_dir: str, stuck_seconds: float = db.STUCK_SEC
 
     def send_photo(job: dict) -> Response:
         name = job["photo_name"]
-        try:
-            with open(photo_path(name), "rb") as f:
-                return Response(f.read(), media_type=next(kind for kind in ENDINGS if name.endswith(ENDINGS[kind])))
-        except OSError:
-            raise HTTPException(404, "This job has no photo")
+        rdget = ramdisk.get(name, None)
+        if rdget is None:
+            try:
+                with open(photo_path(name), "rb") as f:
+                    return Response(f.read(), media_type=next(kind for kind in ENDINGS if name.endswith(ENDINGS[kind])))
+            except OSError:
+                raise HTTPException(404, "This job has no photo")
+        else:
+            return Response(rdget, media_type=next(kind for kind in ENDINGS if name.endswith(ENDINGS[kind])))
 
     def photo_if(job_id: str, allowed) -> Response:
         conn = open_db()
@@ -162,13 +176,19 @@ def create_app(db_path: str, photo_dir: str, stuck_seconds: float = db.STUCK_SEC
         if photo.content_type not in ENDINGS:
             raise HTTPException(422, "The photo must be sent as a JPEG or a PNG")
         name = f"{uuid.uuid4()}.{ENDINGS[photo.content_type]}"
+        data = photo.file.read()
         conn = open_db()
         try:
-            with open(photo_path(name), "wb") as f:
-                f.write(photo.file.read())
+            if process.memory_info().rss < ramdisk_size:
+                ramdisk[name] = data
+            else:
+                with open(photo_path(name), "wb") as f:
+                    f.write(data)
             return {"id": db.create_job(conn, name, site_code)}
         except Exception:
-            delete_photo(photo_path(name))
+            if delete_ramdisk(name):
+                raise
+            delete_photo(name, photo_path(name))
             raise
         finally:
             conn.close()
@@ -341,9 +361,17 @@ def create_app(db_path: str, photo_dir: str, stuck_seconds: float = db.STUCK_SEC
 
     return app
 
+RAMDISK_UNITS = {"k": 1024, "m": 1024**2, "g": 1024**3, "K": 1024, "M": 1024**2, "G": 1024**3}
+
 
 def build_app() -> FastAPI:
     path = os.environ.get("PAWSORT_DB", "data/pawsort.db")
+    ramdisk_size = os.environ.get("PAWSORT_RAMDISK_SIZE", "1G")
+    rsp = ramdisk_size[-1]
+    if rsp.isdigit():
+        ramdisk_size = int(ramdisk_size)
+    else:
+        ramdisk_size = int(ramdisk_size[-1:]) * RAMDISK_UNITS[rsp]
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     return create_app(path, os.environ.get("PAWSORT_PHOTOS", "data/photos"),
                       versions_path=os.environ.get("PAWSORT_VERSIONS", "models/versions.json"))
